@@ -1,10 +1,11 @@
 // WordBar — a macOS menu bar vocabulary flashcard app.
-// Vocabulary file: ~/.config/wordbar/words.txt
-// Format: word|meaning|example|exampleTranslation (last two columns optional)
+// Vocabulary: any .txt under ~/.config/wordbar (default words.txt), switchable
+// in the menu or via Choose File…. Format: word|meaning|example|exampleTranslation
 
 import AVFoundation
 import Cocoa
 import ServiceManagement
+import UniformTypeIdentifiers
 
 struct WordEntry: Equatable {
     let word: String
@@ -81,6 +82,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var showMeaning = UserDefaults.standard.bool(forKey: "showMeaning")
     private var showExample = UserDefaults.standard.bool(forKey: "showExample")
     private let speech = AVSpeechSynthesizer()
+    private var browsePanel: NSPanel?
+    private var browseTable: NSTableView?
 
     private let configDir: URL = {
         let dir = FileManager.default.homeDirectoryForCurrentUser
@@ -88,7 +91,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }()
-    private var wordsURL: URL { configDir.appendingPathComponent("words.txt") }
+    private var defaultWordsURL: URL { configDir.appendingPathComponent("words.txt") }
+    private var wordsURL: URL {
+        if let p = UserDefaults.standard.string(forKey: "wordsPath"), !p.isEmpty {
+            return URL(fileURLWithPath: p)
+        }
+        return defaultWordsURL
+    }
     private var memorizedURL: URL { configDir.appendingPathComponent("memorized.txt") }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -248,6 +257,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(actionItem("Next", #selector(menuSkip)))
             menu.addItem(actionItem(memorized.contains(entry.word) ? "Unmark Memorized" : "Mark as Memorized",
                                     #selector(toggleMark)))
+            menu.addItem(actionItem("Browse Words…", #selector(browseWords)))
             menu.addItem(actionItem("Speak Word", #selector(speak)))
             if !entry.example.isEmpty {
                 menu.addItem(actionItem("Speak Example", #selector(speakExample)))
@@ -268,6 +278,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         menu.addItem(infoItem(stats))
 
+        let vocabItem = NSMenuItem(title: "Vocabulary", action: nil, keyEquivalent: "")
+        vocabItem.submenu = vocabSubmenu()
+        menu.addItem(vocabItem)
         menu.addItem(actionItem("Open Vocabulary File", #selector(openWordsFile)))
         menu.addItem(actionItem("Reload Vocabulary", #selector(reload)))
         menu.addItem(actionItem("Reset Progress", #selector(resetProgress)))
@@ -342,6 +355,136 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.open(wordsURL)
     }
 
+    // MARK: - Vocabulary selection
+
+    private func vocabSubmenu() -> NSMenu {
+        let submenu = NSMenu()
+        for url in wordListFiles() {
+            let item = NSMenuItem(title: url.lastPathComponent,
+                                  action: #selector(selectVocab(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = url.path
+            item.state = url.path == wordsURL.path ? .on : .off
+            submenu.addItem(item)
+        }
+        submenu.addItem(.separator())
+        let choose = NSMenuItem(title: "Choose File…", action: #selector(chooseVocabFile),
+                                keyEquivalent: "")
+        choose.target = self
+        submenu.addItem(choose)
+        return submenu
+    }
+
+    private func existingWordLists() -> [URL] {
+        ((try? FileManager.default.contentsOfDirectory(
+            at: configDir, includingPropertiesForKeys: nil)) ?? [])
+            .filter {
+                $0.pathExtension.lowercased() == "txt" && $0.lastPathComponent != "memorized.txt"
+            }
+            .sorted {
+                $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
+            }
+    }
+
+    private func wordListFiles() -> [URL] {
+        var list = existingWordLists()
+        let active = wordsURL
+        if !list.contains(where: { $0.path == active.path }) {
+            list.insert(active, at: 0)
+        }
+        return list
+    }
+
+    @objc private func selectVocab(_ sender: NSMenuItem) {
+        guard let path = sender.representedObject as? String else { return }
+        UserDefaults.standard.set(path, forKey: "wordsPath")
+        switchVocabulary()
+    }
+
+    @objc private func chooseVocabFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.plainText]
+        panel.directoryURL = configDir
+        if #available(macOS 14.0, *) {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        UserDefaults.standard.set(url.path, forKey: "wordsPath")
+        switchVocabulary()
+    }
+
+    private func switchVocabulary() {
+        lastWordsMod = nil
+        history.removeAll()
+        current = nil
+        reloadWords(force: true)
+        pickNext()
+        browseTable?.reloadData()
+    }
+
+    // MARK: - Word browser
+
+    @objc private func browseWords() {
+        if browsePanel == nil {
+            let size = NSSize(width: 950, height: 440)
+            let panel = NSPanel(contentRect: NSRect(origin: .zero, size: size),
+                                styleMask: [.titled, .closable, .resizable, .utilityWindow],
+                                backing: .buffered, defer: false)
+            panel.title = "WordBar — Browse"
+            panel.isFloatingPanel = true
+            panel.hidesOnDeactivate = false
+            panel.center()
+
+            let scroll = NSScrollView(frame: NSRect(origin: .zero, size: size))
+            scroll.hasVerticalScroller = true
+            scroll.autoresizingMask = [.width, .height]
+            let table = NSTableView(frame: scroll.bounds)
+            for (id, title, width) in [
+                ("done", "✓", 30), ("word", "Word", 150), ("meaning", "Meaning", 250),
+                ("example", "Example", 280), ("translation", "Translation", 220)] as [(String, String, CGFloat)] {
+                let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
+                col.title = title
+                col.width = width
+                col.resizingMask = id == "translation" ? .autoresizingMask : .userResizingMask
+                table.addTableColumn(col)
+            }
+            table.dataSource = self
+            table.delegate = self
+            table.doubleAction = #selector(browseJump)
+            table.target = self
+            scroll.documentView = table
+            panel.contentView = scroll
+            browsePanel = panel
+            browseTable = table
+        }
+        browseTable?.reloadData()
+        if let idx = entries.firstIndex(where: { $0 == current }) {
+            browseTable?.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
+            browseTable?.scrollRowToVisible(idx)
+        }
+        browsePanel?.makeKeyAndOrderFront(nil)
+        if #available(macOS 14.0, *) {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    @objc private func browseJump() {
+        let row = browseTable?.clickedRow ?? -1
+        guard row >= 0, row < entries.count, entries[row] != current else { return }
+        if let c = current { pushHistory(c) }
+        current = entries[row]
+        updateTitle()
+        browseTable?.reloadData()
+        browseTable?.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+    }
+
     @objc private func reload() {
         reloadWords(force: true)
         pickNext()
@@ -375,7 +518,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Storage
 
     private func seedWordFileIfNeeded() {
-        guard !FileManager.default.fileExists(atPath: wordsURL.path) else { return }
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: wordsURL.path) {
+            // Selected list is gone — fall back to another existing list if any.
+            UserDefaults.standard.removeObject(forKey: "wordsPath")
+            if let first = existingWordLists().first {
+                UserDefaults.standard.set(first.path, forKey: "wordsPath")
+            }
+        }
+        // No usable word list at all (fresh install or emptied dir) — seed defaults.
+        guard !fm.fileExists(atPath: wordsURL.path) else { return }
         try? AppDelegate.defaultWords.write(to: wordsURL, atomically: true, encoding: .utf8)
     }
 
@@ -410,6 +562,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     absent|[ˈæbsənt] adj. 缺席的；不在的 vt. 使缺席|Professor Li is absent, I will take the lesson in the place of him.|李教授不在，我替他上课。
     absolute|[ˈæbsəluːt] adj. 绝对的；确实的 n. 绝对的事物|There is no absolute standard for beauty.|美是没有绝对的标准的。
     """
+}
+
+// MARK: - NSTableViewDataSource / NSTableViewDelegate
+
+extension AppDelegate: NSTableViewDataSource, NSTableViewDelegate {
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        entries.count
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
+        guard row < entries.count, let column else { return nil }
+        let entry = entries[row]
+        let id = column.identifier.rawValue
+        let cellId = NSUserInterfaceItemIdentifier("cell.\(id)")
+        let label = (tableView.makeView(withIdentifier: cellId, owner: self) as? NSTextField)
+            ?? NSTextField(labelWithString: "")
+        label.identifier = cellId
+        let text: String
+        switch id {
+        case "done": text = memorized.contains(entry.word) ? "✓" : ""
+        case "word": text = entry.word
+        case "example": text = entry.example
+        case "translation": text = entry.exampleTranslation
+        default: text = entry.meaning
+        }
+        label.stringValue = text
+        label.toolTip = text
+        label.lineBreakMode = .byTruncatingTail
+        label.textColor = memorized.contains(entry.word) ? .secondaryLabelColor : .labelColor
+        label.font = entry == current && id == "word"
+            ? .boldSystemFont(ofSize: NSFont.systemFontSize)
+            : .systemFont(ofSize: NSFont.systemFontSize)
+        return label
+    }
 }
 
 let app = NSApplication.shared

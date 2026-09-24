@@ -13,11 +13,13 @@ macOS 菜单栏背单词小工具 — 单词常驻顶部状态栏，记住了点
 - **菜单栏常驻**：`单词 ✓` 一体显示，不占 Dock
 - **点 `✓`**：标记为已记住并换下一个词
 - **点单词**：弹出菜单 — 音标/释义/例句/翻译，以及 Memorized / Previous / Next / Unmark / 朗读 等操作
+- **浏览词库**：浮动面板列出全部单词，自动定位到当前词——背过的行带 `✓`，双击某行直接跳到该词
 - **菜单栏显示释义/例句**：可开关，超长内容支持横向滑动
 - **TTS 朗读**：macOS 原生 `AVSpeechSynthesizer`，离线可用
 - **顺序背词**：按词库顺序推进，已记住的自动跳过，跳过的词走满一圈会再出现
 - **进度持久化**：已记单词写入 `memorized.txt`，重启不丢
-- **词库热重载**：编辑 `words.txt` 保存后自动刷新
+- **多词库切换**：菜单 Vocabulary 子菜单里可切换 `~/.config/wordbar` 下任意 `.txt` 词库，或 Choose File… 选任意位置的词表，选择会记住
+- **词库热重载**：编辑当前词库文件保存后自动刷新
 - **Anki 导入**：`scripts/apkg2words.py` 可把 `.apkg` 牌组转成词库
 
 ## 构建与运行
@@ -31,7 +33,7 @@ open WordBar.app  # 启动，出现在菜单栏
 
 ## 词库格式
 
-词库文件：`~/.config/wordbar/words.txt`，每行一个：
+当前词库文件（默认 `~/.config/wordbar/words.txt`，可在 Vocabulary 子菜单里换成任意 `.txt`），每行一个：
 
 ```text
 abandon|[əˈbændən] v. 放弃；抛弃|Those who abandon themselves to despair can not succeed.|那些自暴自弃的人无法成功。

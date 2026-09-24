@@ -13,11 +13,13 @@ Native Swift + AppKit, single-file source, zero dependencies, no Xcode project r
 - **Menu bar resident**: unified `word ✓` display, no Dock icon
 - **Click `✓`**: mark as memorized and advance to the next word
 - **Click the word**: menu with phonetic/meaning/example/translation, plus Memorized / Previous / Next / Unmark / Speak actions
+- **Browse Words**: floating scrollable list of the whole vocabulary, auto-positioned at the current word — memorized rows show `✓`, double-click a row to jump to it
 - **Optional in-bar meaning & example**: toggleable; long text scrolls horizontally on hover
 - **TTS**: native `AVSpeechSynthesizer`, works offline
 - **Sequential order**: walks the list in order, skipping memorized words; skipped words come back after a full cycle
 - **Progress persistence**: memorized words saved to `memorized.txt`
-- **Hot reload**: edits to `words.txt` are picked up automatically
+- **Multiple word lists**: pick any `.txt` under `~/.config/wordbar` from the Vocabulary submenu, or Choose File… for a list anywhere else — the choice persists across launches
+- **Hot reload**: edits to the active word list are picked up automatically
 - **Anki import**: `scripts/apkg2words.py` converts `.apkg` decks into the vocabulary format
 
 ## Build & Run
@@ -31,7 +33,7 @@ Requirements: macOS 13+, Xcode Command Line Tools (`swiftc`).
 
 ## Vocabulary Format
 
-`~/.config/wordbar/words.txt`, one word per line:
+The active word list — `~/.config/wordbar/words.txt` by default, or any `.txt` chosen in the Vocabulary submenu — one word per line:
 
 ```text
 abandon|[əˈbændən] v. to give up|Those who abandon themselves to despair can not succeed.|那些自暴自弃的人无法成功。
