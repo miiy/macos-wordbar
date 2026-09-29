@@ -68,6 +68,33 @@ final class HScrollView: NSScrollView {
     }
 }
 
+final class WordPanel: NSPanel {
+    var onPrevious: (() -> Void)?
+    var onNext: (() -> Void)?
+    var onMemorize: (() -> Void)?
+
+    override var canBecomeKey: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        guard event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty else {
+            super.keyDown(with: event)
+            return
+        }
+        switch event.keyCode {
+        case 36, 76: onMemorize?()
+        case 53: orderOut(nil)
+        case 123: onPrevious?()
+        case 124: onNext?()
+        default: super.keyDown(with: event)
+        }
+    }
+
+    override func resignKey() {
+        super.resignKey()
+        orderOut(nil)
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var item: NSStatusItem!
     private let scrollView = HScrollView()
@@ -84,6 +111,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let speech = AVSpeechSynthesizer()
     private var browsePanel: NSPanel?
     private var browseTable: NSTableView?
+    private var detailPanel: WordPanel?
+    private var detailStack: NSStackView?
+    private let detailWord = NSTextField(wrappingLabelWithString: "")
+    private let detailMeaning = NSTextField(wrappingLabelWithString: "")
+    private let detailExample = NSTextField(wrappingLabelWithString: "")
+    private let detailTranslation = NSTextField(wrappingLabelWithString: "")
+    private let detailProgress = NSTextField(wrappingLabelWithString: "")
+    private var detailPreviousButton: NSButton?
+    private var detailMemorizeButton: NSButton?
+    private var detailExampleRow: NSStackView?
+    private let detailPanelWidth: CGFloat = 460
 
     private let configDir: URL = {
         let dir = FileManager.default.homeDirectoryForCurrentUser
@@ -117,7 +155,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             checkLabel.font = font
             checkLabel.textColor = .labelColor
             checkLabel.isHidden = true
-            wordLabel.onLeftClick = { [weak self] in self?.showMenu() }
+            wordLabel.onLeftClick = { [weak self] in self?.showDetailPanel() }
             wordLabel.onRightClick = { [weak self] in self?.showMenu() }
             checkLabel.onLeftClick = { [weak self] in self?.memorizeCurrent() }
             checkLabel.onRightClick = { [weak self] in self?.showMenu() }
@@ -135,11 +173,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // current word still exists, otherwise advance to the next word.
         Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             guard let self, self.reloadWords() else { return }
-            if let c = self.current, !self.entries.contains(where: { $0.word == c.word }) {
-                self.pickNext()
-            } else {
+            if let current = self.current,
+               let updated = self.entries.first(where: { $0.word == current.word }) {
+                self.current = updated
                 self.updateTitle()
+            } else {
+                self.pickNext()
             }
+            self.refreshBrowseTable()
+            if self.detailPanel?.isVisible == true { self.refreshDetailPanel() }
         }
 
         pickNext()
@@ -153,6 +195,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         saveMemorized()
         pushHistory(entry)
         pickNext()
+        refreshBrowseTable(scrollToCurrent: true)
     }
 
     private func pushHistory(_ entry: WordEntry) {
@@ -165,6 +208,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let prev = history.popLast() else { return }
         current = entries.first(where: { $0.word == prev.word }) ?? prev
         updateTitle()
+        refreshBrowseTable(scrollToCurrent: true)
     }
 
     private func saveMemorized() {
@@ -216,7 +260,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // Max visible width of the menu bar text; overflow scrolls horizontally
     // (items that are too wide get hidden by the system).
-    private let maxBarVisibleWidth: CGFloat = 420
+    private let maxBarVisibleWidth: CGFloat = 520
 
     private func layoutLabels() {
         guard let item = item, let button = item.button else { return }
@@ -241,42 +285,195 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.length = x + pad
     }
 
+    private func showDetailPanel() {
+        reloadWords()
+        guard current != nil, let button = item.button else {
+            showMenu()
+            return
+        }
+        if detailPanel == nil { createDetailPanel() }
+        refreshDetailPanel()
+        guard let panel = detailPanel, let window = button.window else { return }
+        let buttonRect = window.convertToScreen(button.convert(button.bounds, to: nil))
+        let screen = NSScreen.screens.first(where: { $0.frame.intersects(buttonRect) }) ?? NSScreen.main
+        let visibleFrame = screen?.visibleFrame ?? buttonRect
+        let x = min(max(buttonRect.midX - panel.frame.width / 2, visibleFrame.minX + 8),
+                    visibleFrame.maxX - panel.frame.width - 8)
+        panel.setFrameOrigin(NSPoint(x: x, y: buttonRect.minY - panel.frame.height - 6))
+        panel.makeKeyAndOrderFront(nil)
+        panel.makeFirstResponder(panel)
+    }
+
+    private func detailSpeechButton(_ action: Selector, _ label: String) -> NSButton {
+        let button = NSButton(frame: .zero)
+        button.image = NSImage(systemSymbolName: "speaker.wave.2", accessibilityDescription: label)
+        button.imagePosition = .imageOnly
+        button.imageScaling = .scaleProportionallyDown
+        button.isBordered = false
+        button.contentTintColor = .secondaryLabelColor
+        button.target = self
+        button.action = action
+        button.toolTip = label
+        button.setAccessibilityLabel(label)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            button.widthAnchor.constraint(equalToConstant: 28),
+            button.heightAnchor.constraint(equalToConstant: 24)
+        ])
+        return button
+    }
+
+    private func createDetailPanel() {
+        let panel = WordPanel(contentRect: NSRect(x: 0, y: 0, width: detailPanelWidth, height: 240),
+                              styleMask: [.borderless, .nonactivatingPanel],
+                              backing: .buffered, defer: false)
+        panel.level = .popUpMenu
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.hidesOnDeactivate = false
+        panel.becomesKeyOnlyIfNeeded = false
+        panel.onPrevious = { [weak self] in self?.detailPrevious() }
+        panel.onNext = { [weak self] in self?.detailNext() }
+        panel.onMemorize = { [weak self] in self?.detailMemorize() }
+
+        let background = NSVisualEffectView(frame: panel.contentView?.bounds ?? .zero)
+        background.autoresizingMask = [.width, .height]
+        background.material = .popover
+        background.blendingMode = .behindWindow
+        background.state = .active
+        background.wantsLayer = true
+        background.layer?.cornerRadius = 10
+        background.layer?.masksToBounds = true
+        panel.contentView = background
+
+        detailWord.font = .boldSystemFont(ofSize: 17)
+        detailMeaning.font = .systemFont(ofSize: 14)
+        detailExample.font = .systemFont(ofSize: 13)
+        detailTranslation.font = .systemFont(ofSize: 13)
+        detailProgress.font = .systemFont(ofSize: 12)
+        [detailWord, detailMeaning, detailExample, detailTranslation, detailProgress].forEach {
+            $0.textColor = .labelColor
+        }
+
+        let wordRow = NSStackView(views: [detailWord,
+                                          detailSpeechButton(#selector(detailSpeakWord), "Speak Word")])
+        wordRow.orientation = .horizontal
+        wordRow.alignment = .centerY
+        wordRow.spacing = 6
+        detailWord.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let exampleRow = NSStackView(views: [detailExample,
+                                             detailSpeechButton(#selector(detailSpeakExample), "Speak Example")])
+        exampleRow.orientation = .horizontal
+        exampleRow.alignment = .centerY
+        exampleRow.spacing = 6
+        detailExample.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let previous = NSButton(title: "Previous", target: self, action: #selector(detailPrevious))
+        let next = NSButton(title: "Next", target: self, action: #selector(detailNext))
+        let memorize = NSButton(title: "Remember & Next", target: self, action: #selector(detailMemorize))
+        let navigation = NSStackView(views: [previous, next, memorize])
+        navigation.orientation = .horizontal
+        navigation.distribution = .fillEqually
+        navigation.spacing = 8
+
+        let stack = NSStackView(views: [wordRow, detailMeaning, exampleRow, detailTranslation,
+                                        detailProgress, navigation])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        background.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: background.leadingAnchor, constant: 16),
+            stack.trailingAnchor.constraint(equalTo: background.trailingAnchor, constant: -16),
+            stack.topAnchor.constraint(equalTo: background.topAnchor, constant: 16),
+            stack.bottomAnchor.constraint(equalTo: background.bottomAnchor, constant: -16),
+            wordRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            detailMeaning.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            exampleRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            detailTranslation.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            detailProgress.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            navigation.widthAnchor.constraint(equalTo: stack.widthAnchor)
+        ])
+        detailPanel = panel
+        detailStack = stack
+        detailPreviousButton = previous
+        detailMemorizeButton = memorize
+        detailExampleRow = exampleRow
+    }
+
+    private func refreshDetailPanel() {
+        guard let panel = detailPanel, let stack = detailStack, let entry = current else {
+            detailPanel?.orderOut(nil)
+            return
+        }
+        detailWord.stringValue = entry.word
+        detailMeaning.stringValue = entry.meaning
+        detailExample.stringValue = entry.example
+        detailTranslation.stringValue = entry.exampleTranslation
+        let remaining = entries.filter { !memorized.contains($0.word) }.count
+        let position = entries.firstIndex(where: { $0 == entry }).map { "No. \($0 + 1) · " } ?? ""
+        detailProgress.stringValue = "\(position)\(remaining) remaining / \(entries.count) total"
+        detailMeaning.isHidden = entry.meaning.isEmpty
+        detailExampleRow?.isHidden = entry.example.isEmpty
+        detailTranslation.isHidden = entry.exampleTranslation.isEmpty
+        detailPreviousButton?.isEnabled = !history.isEmpty
+        detailMemorizeButton?.title = memorized.contains(entry.word) ? "Unmark Memorized" : "Remember & Next"
+        panel.contentView?.layoutSubtreeIfNeeded()
+        panel.setContentSize(NSSize(width: detailPanelWidth, height: max(100, stack.fittingSize.height + 32)))
+        panel.contentView?.layoutSubtreeIfNeeded()
+        panel.makeFirstResponder(panel)
+    }
+
+    @objc private func detailPrevious() {
+        goBack()
+        refreshDetailPanel()
+    }
+
+    @objc private func detailNext() {
+        if let entry = current { pushHistory(entry) }
+        pickNext()
+        refreshBrowseTable(scrollToCurrent: true)
+        refreshDetailPanel()
+    }
+
+    @objc private func detailMemorize() {
+        if let entry = current, memorized.contains(entry.word) {
+            memorized.remove(entry.word)
+            saveMemorized()
+            refreshBrowseTable()
+        } else {
+            memorizeCurrent()
+        }
+        refreshDetailPanel()
+    }
+
+    @objc private func detailSpeakWord() {
+        speak()
+        detailPanel?.makeFirstResponder(detailPanel)
+    }
+
+    @objc private func detailSpeakExample() {
+        speakExample()
+        detailPanel?.makeFirstResponder(detailPanel)
+    }
+
     // MARK: - Menu
 
     private func showMenu() {
         reloadWords()
         let menu = NSMenu()
 
-        if let entry = current {
-            menu.addItem(infoItem(entry.meaning.isEmpty ? entry.word : "\(entry.word): \(entry.meaning)"))
-            if !entry.example.isEmpty { menu.addItem(infoItem(entry.example)) }
-            if !entry.exampleTranslation.isEmpty { menu.addItem(infoItem(entry.exampleTranslation)) }
-            menu.addItem(.separator())
-            menu.addItem(actionItem("Memorized", #selector(menuMemorize)))
-            menu.addItem(actionItem("Previous", #selector(menuBack)))
-            menu.addItem(actionItem("Next", #selector(menuSkip)))
-            menu.addItem(actionItem(memorized.contains(entry.word) ? "Unmark Memorized" : "Mark as Memorized",
-                                    #selector(toggleMark)))
-            menu.addItem(actionItem("Browse Words…", #selector(browseWords)))
-            menu.addItem(actionItem("Speak Word", #selector(speak)))
-            if !entry.example.isEmpty {
-                menu.addItem(actionItem("Speak Example", #selector(speakExample)))
-            }
-            let toggle = actionItem("Show Meaning in Menu Bar", #selector(toggleMeaning))
-            toggle.state = showMeaning ? .on : .off
-            menu.addItem(toggle)
-            let exToggle = actionItem("Show Example in Menu Bar", #selector(toggleExample))
-            exToggle.state = showExample ? .on : .off
-            menu.addItem(exToggle)
-            menu.addItem(.separator())
-        }
-
-        let remaining = entries.filter { !memorized.contains($0.word) }.count
-        var stats = "\(remaining) remaining / \(entries.count) total"
-        if let pos = entries.firstIndex(where: { $0 == current }) {
-            stats = "No. \(pos + 1) · " + stats
-        }
-        menu.addItem(infoItem(stats))
+        menu.addItem(actionItem("Browse Words…", #selector(browseWords)))
+        let toggle = actionItem("Show Meaning in Menu Bar", #selector(toggleMeaning))
+        toggle.state = showMeaning ? .on : .off
+        menu.addItem(toggle)
+        let exToggle = actionItem("Show Example in Menu Bar", #selector(toggleExample))
+        exToggle.state = showExample ? .on : .off
+        menu.addItem(exToggle)
+        menu.addItem(.separator())
 
         let vocabItem = NSMenuItem(title: "Vocabulary", action: nil, keyEquivalent: "")
         vocabItem.submenu = vocabSubmenu()
@@ -293,7 +490,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         item.menu = menu
         item.button?.performClick(nil)
-        DispatchQueue.main.async { self.item?.menu = nil }
+        DispatchQueue.main.async { [weak self, weak menu] in
+            guard let self, self.item?.menu === menu else { return }
+            self.item?.menu = nil
+        }
     }
 
     private func actionItem(_ title: String, _ selector: Selector) -> NSMenuItem {
@@ -302,32 +502,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return item
     }
 
-    private func infoItem(_ title: String) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        item.isEnabled = false
-        return item
-    }
-
     // MARK: - Menu actions
-
-    @objc private func menuMemorize() { memorizeCurrent() }
-
-    @objc private func menuBack() { goBack() }
-
-    @objc private func menuSkip() {
-        if let entry = current { pushHistory(entry) }
-        pickNext()
-    }
-
-    @objc private func toggleMark() {
-        guard let entry = current else { return }
-        if memorized.contains(entry.word) {
-            memorized.remove(entry.word)
-        } else {
-            memorized.insert(entry.word)
-        }
-        saveMemorized()
-    }
 
     @objc private func speak() { speakText(current?.word ?? "") }
     @objc private func speakExample() { speakText(current?.example ?? "") }
@@ -424,10 +599,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         current = nil
         reloadWords(force: true)
         pickNext()
-        browseTable?.reloadData()
+        refreshBrowseTable(scrollToCurrent: true)
     }
 
     // MARK: - Word browser
+
+    private func refreshBrowseTable(scrollToCurrent: Bool = false) {
+        guard let table = browseTable else { return }
+        table.reloadData()
+        guard let index = entries.firstIndex(where: { $0 == current }) else {
+            table.deselectAll(nil)
+            return
+        }
+        table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        if scrollToCurrent { table.scrollRowToVisible(index) }
+    }
 
     @objc private func browseWords() {
         if browsePanel == nil {
@@ -462,11 +648,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             browsePanel = panel
             browseTable = table
         }
-        browseTable?.reloadData()
-        if let idx = entries.firstIndex(where: { $0 == current }) {
-            browseTable?.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
-            browseTable?.scrollRowToVisible(idx)
-        }
+        refreshBrowseTable(scrollToCurrent: true)
         browsePanel?.makeKeyAndOrderFront(nil)
         if #available(macOS 14.0, *) {
             NSApp.activate()
@@ -481,19 +663,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let c = current { pushHistory(c) }
         current = entries[row]
         updateTitle()
-        browseTable?.reloadData()
-        browseTable?.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        refreshBrowseTable(scrollToCurrent: true)
+    }
+
+    @objc private func browseToggleMemorized(_ sender: NSButton) {
+        let row = sender.tag
+        guard row >= 0, row < entries.count else { return }
+        let entry = entries[row]
+        if sender.state == .on {
+            memorized.insert(entry.word)
+            if entry == current {
+                pushHistory(entry)
+                pickNext()
+            }
+        } else {
+            memorized.remove(entry.word)
+            if current == nil {
+                current = entry
+                updateTitle()
+            }
+        }
+        saveMemorized()
+        refreshBrowseTable()
     }
 
     @objc private func reload() {
+        let currentWord = current?.word
         reloadWords(force: true)
-        pickNext()
+        if let currentWord, let updated = entries.first(where: { $0.word == currentWord }) {
+            current = updated
+            updateTitle()
+        } else {
+            pickNext()
+        }
+        refreshBrowseTable(scrollToCurrent: true)
     }
 
     @objc private func resetProgress() {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Reset all progress?"
+        alert.informativeText = "All memorized marks will be removed. This cannot be undone."
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Reset Progress")
+        if #available(macOS 14.0, *) {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
         memorized.removeAll()
         try? FileManager.default.removeItem(at: memorizedURL)
         pickNext()
+        refreshBrowseTable(scrollToCurrent: true)
     }
 
     @objc private func toggleLoginItem() {
@@ -576,24 +798,45 @@ extension AppDelegate: NSTableViewDataSource, NSTableViewDelegate {
         let entry = entries[row]
         let id = column.identifier.rawValue
         let cellId = NSUserInterfaceItemIdentifier("cell.\(id)")
+        if id == "done" {
+            let container = tableView.makeView(withIdentifier: cellId, owner: self) ?? NSView()
+            container.identifier = cellId
+            let checkbox: NSButton
+            if let existing = container.subviews.first as? NSButton {
+                checkbox = existing
+            } else {
+                checkbox = NSButton(checkboxWithTitle: "", target: self,
+                                    action: #selector(browseToggleMemorized(_:)))
+                checkbox.translatesAutoresizingMaskIntoConstraints = false
+                container.addSubview(checkbox)
+                NSLayoutConstraint.activate([
+                    checkbox.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+                    checkbox.centerYAnchor.constraint(equalTo: container.centerYAnchor)
+                ])
+            }
+            checkbox.target = self
+            checkbox.action = #selector(browseToggleMemorized(_:))
+            checkbox.tag = row
+            checkbox.state = memorized.contains(entry.word) ? .on : .off
+            checkbox.toolTip = checkbox.state == .on ? "Mark as not memorized" : "Mark as memorized"
+            checkbox.setAccessibilityLabel("Memorized: \(entry.word)")
+            return container
+        }
         let label = (tableView.makeView(withIdentifier: cellId, owner: self) as? NSTextField)
             ?? NSTextField(labelWithString: "")
         label.identifier = cellId
         let text: String
         switch id {
-        case "done": text = memorized.contains(entry.word) ? "✓" : ""
-        case "word": text = entry.word
+        case "word": text = entry == current ? "▶ \(entry.word)" : entry.word
         case "example": text = entry.example
         case "translation": text = entry.exampleTranslation
         default: text = entry.meaning
         }
         label.stringValue = text
-        label.toolTip = text
+        label.toolTip = id == "word" ? entry.word : text
         label.lineBreakMode = .byTruncatingTail
         label.textColor = memorized.contains(entry.word) ? .secondaryLabelColor : .labelColor
-        label.font = entry == current && id == "word"
-            ? .boldSystemFont(ofSize: NSFont.systemFontSize)
-            : .systemFont(ofSize: NSFont.systemFontSize)
+        label.font = .systemFont(ofSize: NSFont.systemFontSize)
         return label
     }
 }
